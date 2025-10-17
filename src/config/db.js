@@ -5,7 +5,7 @@ const connectDB = async () => {
     // ✅ Choose DB based on environment
     const uri =
       process.env.NODE_ENV === "production"
-        ? process.env.MONGO_URI_PROD
+        ? process.env.MONGO_URI
         : process.env.MONGO_URI_DEV;
 
     // ✅ Modern connection (no deprecated options)
