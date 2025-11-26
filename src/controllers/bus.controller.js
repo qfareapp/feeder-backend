@@ -58,3 +58,18 @@ export const addBus = async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 };
+// GET single bus by ID
+export const getBusById = async (req, res) => {
+  try {
+    const bus = await Bus.findById(req.params.id);
+
+    if (!bus) {
+      return res.status(404).json({ success: false, message: "Bus not found" });
+    }
+
+    res.json({ success: true, bus });
+  } catch (err) {
+    console.error("❌ Error fetching bus:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};

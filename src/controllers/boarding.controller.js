@@ -4,6 +4,7 @@ import DailyBooking from "../models/dailyBooking.model.js";
 export const confirmBoarding = async (req, res) => {
   try {
     const { userId, bookingId, qrToken } = req.body;
+
     console.log("🧾 Incoming boarding request:", { userId, bookingId, qrToken });
 
     if (!userId || !bookingId || !qrToken) {
@@ -13,30 +14,30 @@ export const confirmBoarding = async (req, res) => {
       });
     }
 
-    // 🧠 Extract regNumber safely from QR
-    const regMatch = qrToken.match(/BUSQR-([a-zA-Z0-9]+)-/);
-    const regNumber = regMatch ? regMatch[1].toUpperCase() : null;
+    // Extract reg number from QR
+    const match = qrToken.match(/BUSQR-([a-zA-Z0-9]+)-/);
+    const regNumber = match ? match[1].toUpperCase() : null;
 
     if (!regNumber) {
-      console.error("❌ Invalid QR token:", qrToken);
       return res.status(400).json({
         success: false,
-        message: "Invalid QR code format",
+        message: "Invalid QR format",
       });
     }
 
-    // 🔍 Find bus by registration number (case-insensitive)
-    const bus = await Bus.findOne({ regNumber: new RegExp(`^${regNumber}$`, "i") });
+    // Lookup bus
+    const bus = await Bus.findOne({
+      regNumber: new RegExp(`^${regNumber}$`, "i"),
+    });
+
     if (!bus) {
-      console.error("❌ Bus not found for regNumber:", regNumber);
       return res.status(404).json({
         success: false,
-        message: "Bus not found for this QR code",
+        message: "Bus not found",
       });
     }
-    console.log("✅ Found bus:", bus.regNumber);
 
-    // 🔎 Find the user’s active booking
+    // Lookup booking
     const booking = await DailyBooking.findOne({
       _id: bookingId,
       userId,
@@ -49,97 +50,121 @@ export const confirmBoarding = async (req, res) => {
         message: "No pending reservation found or already boarded.",
       });
     }
-    console.log("✅ Found booking:", booking._id);
 
-    // 🚍 Verify bus assignment
-    const thisBus =
-      booking.pickupBusId?.toString() === bus._id.toString()
-        ? "pickup"
-        : booking.dropBusId?.toString() === bus._id.toString()
-        ? "drop"
-        : null;
+    // Check if scanning pickup or drop
+    const isPickupTrip =
+      booking.pickupBusId?.toString() === bus._id.toString();
+    const isDropTrip =
+      booking.dropBusId?.toString() === bus._id.toString();
 
-    console.log("🚍 Matched bus type:", thisBus);
-    if (!thisBus) {
-      return res.status(400).json({
+    if (!isPickupTrip && !isDropTrip) {
+      return res.status(403).json({
         success: false,
-        message: "This bus is not assigned for this booking.",
+        message: "This QR does not match your assigned bus.",
       });
     }
 
-    // 🪑 Seat allocation if not already assigned
-    if (!booking.seatNo) {
+    // Identify trip type
+    const tripType = isPickupTrip ? "pickup" : "drop";
+
+    // BLOCK duplicate scanning
+    if (tripType === "pickup" && booking.pickupBoarded) {
+      return res.json({
+        success: false,
+        message: "Pickup already boarded.",
+      });
+    }
+
+    if (tripType === "drop" && booking.dropBoarded) {
+      return res.json({
+        success: false,
+        message: "Drop already boarded.",
+      });
+    }
+
+    // Assign seat if not assigned
+    const seatField = tripType === "pickup" ? "pickupSeatNo" : "dropSeatNo";
+
+    if (!booking[seatField]) {
       const totalSeats = bus.seatingCapacity || 25;
+
+      // get taken seats for THIS TRIP ONLY
       const takenSeats = await DailyBooking.find({
         date: booking.date,
-        $or: [{ pickupBusId: bus._id }, { dropBusId: bus._id }],
-        seatNo: { $ne: null },
-      }).distinct("seatNo");
+        [tripType + "BusId"]: bus._id,
+        [seatField]: { $ne: null },
+      }).distinct(seatField);
 
-      const availableSeats = Array.from({ length: totalSeats }, (_, i) => i + 1)
-        .filter((s) => !takenSeats.includes(s));
+      const availableSeats = Array.from(
+        { length: totalSeats },
+        (_, i) => i + 1
+      ).filter((s) => !takenSeats.includes(s));
 
       if (availableSeats.length === 0) {
         return res.status(400).json({
           success: false,
-          message: "No available seats on this bus",
+          message: "No seats left for this trip.",
         });
       }
 
-      booking.seatNo =
+      booking[seatField] =
         availableSeats[Math.floor(Math.random() * availableSeats.length)];
     }
 
-    booking.status = "boarded";
-    booking.boarded = true;
+    // Mark boarding for this trip
+    if (tripType === "pickup") booking.pickupBoarded = true;
+    if (tripType === "drop") booking.dropBoarded = true;
+
     await booking.save();
 
-    console.log("✅ Boarding confirmed:", {
-      userId,
-      bookingId,
-      seatNo: booking.seatNo,
-      busId: bus._id,
+    console.log("✅ Boarding confirmed", {
+      tripType,
+      seatNo: booking[seatField],
     });
 
     return res.json({
       success: true,
-      message: "Boarding confirmed",
-      seatNo: booking.seatNo,
+      message: tripType + " boarding confirmed",
+      tripType,
+      seatNo: booking[seatField],
       busId: bus._id,
       regNumber: bus.regNumber,
     });
   } catch (err) {
-    console.error("❌ Boarding confirm error:", err);
+    console.error("❌ Boarding error:", err);
     res.status(500).json({
       success: false,
-      message: "Server error while confirming boarding",
+      message: "Server error during boarding confirmation",
     });
   }
 };
-
 export const getBoardingStatus = async (req, res) => {
   try {
     const { bookingId } = req.params;
+
     const booking = await DailyBooking.findById(bookingId)
       .populate("pickupBusId dropBusId", "regNumber seatingCapacity")
       .lean();
 
-    if (!booking)
+    if (!booking) {
       return res.status(404).json({
         success: false,
         message: "Booking not found",
       });
+    }
 
-    res.json({
+    return res.json({
       success: true,
-      boarded: booking.boarded,
-      seatNo: booking.seatNo,
-      status: booking.status,
+      pickupBoarded: booking.pickupBoarded,
+      dropBoarded: booking.dropBoarded,
+      pickupSeatNo: booking.pickupSeatNo,
+      dropSeatNo: booking.dropSeatNo,
       pickupBus: booking.pickupBusId,
       dropBus: booking.dropBusId,
+      status: booking.status,
     });
   } catch (err) {
-    console.error("❌ Error fetching boarding status:", err);
+    console.error("❌ Booking status error:", err);
     res.status(500).json({ success: false, message: "Server error" });
   }
 };

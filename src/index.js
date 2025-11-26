@@ -51,6 +51,9 @@ import driverAuthRoutes from "./routes/driverAuth.routes.js";
 import passRoutes from "./routes/pass.routes.js";
 import dailyRoutes from "./routes/daily.routes.js";
 import boardingRoutes from "./routes/boarding.routes.js";
+import rideHistoryRoutes from "./routes/rideHistory.routes.js";
+import driverResetRoutes from "./routes/driverReset.routes.js";
+
 
 app.use("/api/societies", societyRoutes);
 app.use("/api/user", userRoutes);
@@ -61,6 +64,8 @@ app.use("/api/driver", driverAuthRoutes);
 app.use("/api/passes", passRoutes);
 app.use("/api/daily-bookings", dailyRoutes);
 app.use("/api/boarding", boardingRoutes);
+app.use("/api/rides", rideHistoryRoutes);
+app.use("/api/driver", driverResetRoutes);
 
 app.get("/ping", (req, res) => res.json({ message: "pong ✅" }));
 

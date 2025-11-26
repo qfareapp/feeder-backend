@@ -34,11 +34,13 @@ router.post("/", async (req, res) => {
 
     console.log("📩 Daily booking request received:", req.body);
 
-    if (!userId || !pickupSlot || !dropSlot || !routeNo) {
-      return res
-        .status(400)
-        .json({ success: false, error: "Missing required fields" });
-    }
+    // ✅ Allow one-way either pickup or drop slot
+if (!userId || !routeNo || (!pickupSlot && !dropSlot)) {
+  return res
+    .status(400)
+    .json({ success: false, error: "Missing required fields (need pickupSlot or dropSlot)" });
+}
+
 
     // ✅ Step 1: Check user has an active pass
     const pass = await Pass.findOne({ userId, status: "Active" });
@@ -101,13 +103,26 @@ const debugSchedules = await BusSchedule.find({ routeId: route._id })
   .lean();
 console.log("🗓️ All schedules for this route:", debugSchedules);
 
-const schedule = await BusSchedule.findOne({
+let schedule = null;
+let tripType = pickupSlot ? "pickup" : "drop";
+const slotToUse = pickupSlot || dropSlot;
+
+console.log("🔍 Looking for schedule:", { tripType, slotToUse });
+
+schedule = await BusSchedule.findOne({
   routeId: route._id,
-  slot: pickupSlot,
-  tripType: "pickup",
+  slot: slotToUse,
+  tripType,
   date: { $gte: startOfDay, $lt: endOfDay },
   status: { $regex: "^(Active|Scheduled)$", $options: "i" },
 }).populate("routeId");
+
+if (!schedule) {
+  return res
+    .status(400)
+    .json({ success: false, error: "Invalid or inactive trip slot" });
+}
+
 
 console.log("🚌 Found schedule:", schedule ? schedule._id : "❌ none");
 
@@ -161,24 +176,37 @@ console.log("🚌 Found schedule:", schedule ? schedule._id : "❌ none");
         .json({ success: false, error: "No seats available" });
     }
 
-    // 6️⃣ Create booking
+ // 5️⃣.5️⃣ Prevent duplicate booking by same user
+const existingBooking = await DailyBooking.findOne({
+  userId,
+  date: startOfDay,
+  $or: [{ pickupSlot }, { dropSlot }],
+  status: { $in: ["reserved", "boarded"] },
+});
+
+if (existingBooking) {
+  return res.status(400).json({
+    success: false,
+    error: "You have already booked for this date and slot.",
+  });
+}
     // 6️⃣ Create booking (with separate buses for pickup & drop)
 const booking = await DailyBooking.create({
   userId,
   date: startOfDay,
   pickupLocation: pickupLocation || pass.pickupLocation || route.startPoint,
-  dropLocation: dropLocation || route.endPoint || pass.dropLocation,
-  pickupSlot,
-  dropSlot,
+  dropLocation: dropLocation || pass.dropLocation || route.endPoint,
+  pickupSlot: pickupSlot || null,
+  dropSlot: dropSlot || null,
   status: "reserved",
   seatNo: null,
   routeId: route._id,
   routeNo: route.routeNo,
-
-  // 🚌 assign pickup and drop bus IDs separately
-  pickupBusId: schedule?.busId || null, // from the pickup schedule
-  dropBusId: null, // will assign if drop schedule found later
+  pickupBusId: tripType === "pickup" ? schedule?.busId || null : null,
+  dropBusId: tripType === "drop" ? schedule?.busId || null : null,
+  scheduleId: schedule?._id || null,
 });
+
 
 // 7️⃣ Optionally find a drop schedule (evening return bus)
 let dropSchedule = null;
@@ -224,14 +252,15 @@ router.post("/board", async (req, res) => {
   try {
     const { userId, date, pickupSlot, busId } = req.body;
     const travelDate = DateTime.fromISO(date, { zone: "Asia/Kolkata" })
-  .startOf("day")
-  .toJSDate();
+      .startOf("day")
+      .toJSDate();
 
+    // Treat pickupSlot as a generic slot param (can be drop slot too)
     const booking = await DailyBooking.findOne({
       userId,
       date: travelDate,
-      pickupSlot,
-      status: "reserved",
+      $or: [{ pickupSlot }, { dropSlot: pickupSlot }],
+      status: { $in: ["reserved", "boarded"] },
     });
 
     if (!booking) {
@@ -240,19 +269,32 @@ router.post("/board", async (req, res) => {
         .json({ success: false, error: "No reserved booking found" });
     }
 
-    const boardedCount = await DailyBooking.countDocuments({
-      date: travelDate,
-      pickupSlot,
-      busId,
-      status: "boarded",
-    });
+    // Determine which segment is being boarded
+    const tripType =
+      booking.dropSlot && booking.dropSlot === pickupSlot ? "drop" : "pickup";
 
-    booking.seatNo = boardedCount + 1;
+    const seatFilter =
+      tripType === "pickup"
+        ? { date: travelDate, pickupSlot, status: "boarded" }
+        : { date: travelDate, dropSlot: pickupSlot, status: "boarded" };
+
+    const boardedCount = await DailyBooking.countDocuments(seatFilter);
+    const seatNo = boardedCount + 1;
+
+    if (tripType === "pickup") {
+      booking.pickupSeatNo = seatNo;
+      booking.pickupBoarded = true;
+      booking.pickupBusId = busId || booking.pickupBusId;
+    } else {
+      booking.dropSeatNo = seatNo;
+      booking.dropBoarded = true;
+      booking.dropBusId = busId || booking.dropBusId;
+    }
+
     booking.status = "boarded";
-    booking.busId = busId;
     await booking.save();
 
-    res.json({ success: true, booking });
+    res.json({ success: true, booking, seatNo, tripType });
   } catch (err) {
     console.error("❌ Error in boarding:", err);
     res
@@ -336,45 +378,93 @@ router.get("/availability", async (req, res) => {
       });
     }
 
-    // 🎟️ 5️⃣ Aggregate seat bookings
-    const bookings = await DailyBooking.aggregate([
-      {
-        $match: {
-  routeId: route._id,
-  date: startOfDay,
-  status: { $in: ["reserved", "boarded"] },
+    // 🎟️ 5️⃣ Aggregate seat bookings (both pickup & drop)
+const bookings = await DailyBooking.aggregate([
+  {
+    $match: {
+      routeId: route._id,
+      date: startOfDay,
+      status: { $in: ["reserved", "boarded"] },
+    },
+  },
+  {
+    $project: {
+      pickupSlot: 1,
+      dropSlot: 1,
+    },
+  },
+  {
+    $facet: {
+      pickup: [
+        { $group: { _id: "$pickupSlot", count: { $sum: 1 } } },
+      ],
+      drop: [
+        { $group: { _id: "$dropSlot", count: { $sum: 1 } } },
+      ],
+    },
+  },
+]);
+
+const bookingMap = {};
+if (bookings.length) {
+  bookings[0].pickup.forEach((b) => (bookingMap[b._id] = b.count));
+  bookings[0].drop.forEach((b) => (bookingMap[b._id] = b.count));
 }
-      },
-      { $group: { _id: "$pickupSlot", count: { $sum: 1 } } },
-    ]);
 
-    const bookingMap = {};
-    bookings.forEach((b) => (bookingMap[b._id] = b.count));
+// 🧮 6️⃣ Calculate availability per schedule
+const result = schedules.map((s) => {
+  const bookedCount = bookingMap[s.slot] || s.booked || 0;
+  return {
+    slot: s.slot,
+    tripType: s.tripType,
+    status: s.status,
+    totalSeats: s.totalSeats,
+    booked: bookedCount,
+    available: Math.max(0, (Number(s.totalSeats) || 0) - bookedCount),
+    busId: s.busId,
+    societyId: s.societyId,
+    startTime: s.startTime,
+    endTime: s.endTime,
+  };
+});
 
-    // 🧮 6️⃣ Calculate availability
-    const result = schedules.map((s) => ({
-      slot: s.slot,
-      tripType: s.tripType,
-      status: s.status,
-      totalSeats: s.totalSeats,
-      booked: bookingMap[s.slot] || s.booked || 0,
-      available: Math.max(
-        0,
-        (Number(s.totalSeats) || 0) - (bookingMap[s.slot] || s.booked || 0)
-      ),
-      busId: s.busId,
-      societyId: s.societyId,
-      startTime: s.startTime,
-      endTime: s.endTime,
-    }));
+return res.json({ success: true, data: result });
 
-    // ✅ Final response
-    return res.json({ success: true, data: result });
   } catch (err) {
     console.error("❌ Error loading availability:", err);
     return res
       .status(500)
       .json({ success: false, error: "Server error, please try again" });
+  }
+});
+router.get("/active/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    // Use IST day boundaries to avoid off-by-one when server is in another TZ
+    const todayIST = DateTime.now()
+      .setZone("Asia/Kolkata")
+      .startOf("day")
+      .toJSDate();
+
+    const booking = await DailyBooking.findOne({
+      userId,
+      date: { $gte: todayIST },
+      status: { $in: ["reserved", "boarded"] },
+      completed: false,
+    })
+      .sort({ createdAt: -1 })
+      .populate("pickupBusId", "regNumber driverName driverContact")
+      .populate("dropBusId", "regNumber driverName driverContact")
+      .populate("routeId", "routeNo startPoint endPoint");
+
+    if (!booking)
+      return res.json({ success: false, message: "No active booking" });
+
+    res.json({ success: true, booking });
+  } catch (err) {
+    console.error("❌ Error fetching active booking:", err);
+    res.status(500).json({ success: false, error: "Server error" });
   }
 });
 
@@ -438,30 +528,6 @@ router.get("/:id", async (req, res) => {
 });
 
 
-router.get("/active/:userId", async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const today = new Date();
-
-    const booking = await DailyBooking.findOne({
-      userId,
-      date: { $gte: today.setHours(0, 0, 0, 0) },
-      status: { $in: ["reserved", "boarded"] },
-    })
-      .sort({ createdAt: -1 })
-      .populate("pickupBusId", "regNumber driverName driverContact")
-      .populate("dropBusId", "regNumber driverName driverContact")
-      .populate("routeId", "routeNo startPoint endPoint");
-
-    if (!booking)
-      return res.json({ success: false, message: "No active booking" });
-
-    res.json({ success: true, booking });
-  } catch (err) {
-    console.error("❌ Error fetching active booking:", err);
-    res.status(500).json({ success: false, error: "Server error" });
-  }
-});
 
 
 

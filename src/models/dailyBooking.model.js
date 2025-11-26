@@ -10,67 +10,72 @@ const dailyBookingSchema = new mongoose.Schema(
 
     routeId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "Route", // ✅ allows populate('routeId')
+      ref: "Route",
     },
 
-    routeNo: {
-      type: String,
-    },
+    routeNo: String,
 
     date: {
       type: Date,
-      required: true, // travel day
-    },
-
-    pickupLocation: {
-      type: String,
       required: true,
     },
 
-    dropLocation: {
-      type: String,
-      required: true,
-    },
+    pickupLocation: String,
+    dropLocation: String,
 
-    pickupSlot: {
-      type: String,
-      required: true,
-    },
+    pickupSlot: String,
+    dropSlot: String,
 
-    dropSlot: {
-      type: String,
-    },
-
-    seatNo: {
+    // ⭐ Separate seats for pickup & drop
+    pickupSeatNo: {
       type: Number,
-      default: null, // assigned only after boarding
+      default: null,
+    },
+    dropSeatNo: {
+      type: Number,
+      default: null,
+    },
+
+    // ⭐ Separate boarding flags
+    pickupBoarded: {
+      type: Boolean,
+      default: false,
+    },
+    dropBoarded: {
+      type: Boolean,
+      default: false,
     },
 
     status: {
       type: String,
-      enum: ["reserved", "boarded", "cancelled"],
+      enum: ["reserved", "boarded", "completed", "cancelled"],
       default: "reserved",
     },
-    // ✅ Whether user actually boarded (on QR scan)
-    boarded: {
-      type: Boolean,
-      default: false,
-    },
-    // 🚌 Two different buses — one for pickup, one for drop
+
     pickupBusId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Bus",
     },
-
     dropBusId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Bus",
     },
+     // ⭐ Needed for linking to schedule
+    scheduleId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "BusSchedule",
+    },
+      boarded: { type: Boolean, default: false },   // you probably already have this
+  completed: { type: Boolean, default: false }, // when trip is fully done
+
   },
   { timestamps: true }
 );
 
-// ✅ Prevent double-booking for same user/date/slot
-dailyBookingSchema.index({ userId: 1, date: 1, pickupSlot: 1 }, { unique: true });
+// Prevent duplicate for same user + date + slot
+dailyBookingSchema.index(
+  { userId: 1, date: 1, pickupSlot: 1, dropSlot: 1 },
+  { unique: true, partialFilterExpression: { status: { $in: ["reserved"] } } }
+);
 
 export default mongoose.model("DailyBooking", dailyBookingSchema);

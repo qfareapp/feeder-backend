@@ -42,23 +42,31 @@ const busSchema = new mongoose.Schema(
     password: { type: String, required: true }, // hashed password for driver
 
     // 🆕 Boarding QR integration
-    qrToken: { type: String, unique: true }, // ✅ unique identifier for this bus’s QR
-    qrCode: { type: String }, // ✅ stores Base64 or hosted image URL
+    qrToken: { type: String, unique: true },
+    qrCode: { type: String },
 
-    // Bus operational status
     status: { type: String, default: "active" },
   },
   { timestamps: true }
 );
 
-// ✅ Pre-save hook to hash password
+// 🔐 AUTO-GENERATE PASSWORD BEFORE HASHING
 busSchema.pre("save", async function (next) {
-  if (!this.isModified("password")) return next();
-  this.password = await bcrypt.hash(this.password, 10);
+  // If password is missing (from BusOnboardingForm), auto-create one
+  if (!this.password || this.password.trim() === "") {
+    const last4 = this.regNumber?.slice(-4) || "0000";
+    this.password = `${last4}@bus`;  // 👉 Plain password before hashing
+  }
+
+  // If password field was changed OR auto-generated, hash it
+  if (this.isModified("password")) {
+    this.password = await bcrypt.hash(this.password, 10);
+  }
+
   next();
 });
 
-// ✅ Method to check password
+// 🔍 Compare password during login
 busSchema.methods.comparePassword = async function (candidatePassword) {
   return bcrypt.compare(candidatePassword, this.password);
 };
