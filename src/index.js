@@ -25,16 +25,36 @@ const PORT = process.env.PORT || 5000;
 // ✅ UPDATED: CORS setup (with Expo regex + local dev)
 app.use(
   cors({
-    origin: [
-      "https://feeder-frontend-flame.vercel.app", // production frontend
-      /\.expo\.dev$/,                             // all Expo subdomains
-      "http://localhost:5173",                    // local dev frontend
-      "exp://localhost:19000",                    // Expo Go local debug
-    ],
+    origin: function (origin, callback) {
+      // Allow requests with no origin (mobile apps, APK, Postman)
+      if (!origin) return callback(null, true);
+
+      // Allowed origins
+      const allowedOrigins = [
+        "https://feeder-frontend-flame.vercel.app", // production frontend
+        "http://localhost:5173",                    // local dev web
+        "exp://localhost:19000",                    // Expo Go
+      ];
+
+      // Allow any *.expo.dev subdomain
+      if (/\.expo\.dev$/.test(origin)) {
+        return callback(null, true);
+      }
+
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      // Otherwise block
+      return callback(new Error(`CORS: Origin ${origin} not allowed`));
+    },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     credentials: true,
   })
 );
+
+// Handle OPTIONS requests for Android 12+ / 13+
+app.options("*", cors());
 app.use(express.json());
 
 // Routes
@@ -60,12 +80,15 @@ app.use("/api/user", userRoutes);
 app.use("/api/routes", routeRoutes);
 app.use("/api/buses", busRoutes);
 app.use("/api/schedules", scheduleRoutes);
-app.use("/api/driver", driverAuthRoutes);
+
+app.use("/api/driver/auth", driverAuthRoutes);   // <-- Correct
+app.use("/api/driver/reset", driverResetRoutes); // <-- Correct
+
 app.use("/api/passes", passRoutes);
 app.use("/api/daily-bookings", dailyRoutes);
 app.use("/api/boarding", boardingRoutes);
 app.use("/api/rides", rideHistoryRoutes);
-app.use("/api/driver", driverResetRoutes);
+
 
 app.get("/ping", (req, res) => res.json({ message: "pong ✅" }));
 
