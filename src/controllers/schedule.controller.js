@@ -133,15 +133,33 @@ export const getSchedules = async (req, res) => {
       .populate("societyId", "name")
       .sort({ slot: 1 });
 
-    // 🧮 Add computed fields
-    const enriched = schedules.map((s) => ({
-      ...s.toObject(),
-      totalSeats: s.busId?.seatingCapacity || s.totalSeats || 0,
-      available: Math.max(
-        0,
-        (s.busId?.seatingCapacity || s.totalSeats || 0) - (s.booked || 0)
-      ),
-    }));
+    // 🧮 Add computed fields + live booked count from DailyBooking
+    const enriched = await Promise.all(
+      schedules.map(async (s) => {
+        // normalize date to day start for booking lookup
+        const day = DateTime.fromJSDate(s.date).startOf("day").toJSDate();
+        const bookingQuery = {
+          date: day,
+          routeId: s.routeId?._id || s.routeId,
+          status: { $in: ["reserved", "boarded"] },
+        };
+        if (s.tripType === "pickup") {
+          bookingQuery.pickupSlot = s.slot;
+        } else {
+          bookingQuery.dropSlot = s.slot;
+        }
+
+        const bookedCount = await DailyBooking.countDocuments(bookingQuery);
+        const totalSeats = s.busId?.seatingCapacity || s.totalSeats || 0;
+
+        return {
+          ...s.toObject(),
+          totalSeats,
+          booked: bookedCount,
+          available: Math.max(0, totalSeats - bookedCount),
+        };
+      })
+    );
 
     res.json({ success: true, schedules: enriched });
   } catch (err) {
